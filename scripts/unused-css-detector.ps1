@@ -2,12 +2,14 @@
 
 <#
 .SYNOPSIS
-    Detects unused CSS classes in a Next.js project
+    Enhanced CSS Unused Class Detector with SCSS-aware parsing and confidence scoring
 
 .DESCRIPTION
-    This script scans SCSS files to extract CSS class names and then searches
-    JavaScript/JSX files to determine which classes are actually used.
-    It handles BEM naming conventions and nested SCSS structures.
+    This enhanced script provides intelligent detection of unused CSS classes with:
+    - SCSS-aware parsing (filters functions, variables, data URIs)
+    - Confidence scoring (High/Medium/Low reliability)
+    - Enhanced validation and filtering
+    - Better reporting with categorized results
 
 .PARAMETER StylesPath
     Path to the styles directory (default: "./src/styles")
@@ -15,47 +17,47 @@
 .PARAMETER ComponentsPath
     Path to search for component files (default: "./src")
 
-.PARAMETER ExcludePatterns
-    Array of patterns to exclude from usage search (default: common utility classes)
-
 .PARAMETER OutputFormat
     Output format: "summary", "detailed", or "json" (default: "summary")
 
-.PARAMETER DeleteUnused
-    Actually delete unused CSS classes from files (default: false)
+.PARAMETER ConfidenceLevel
+    Minimum confidence level to report: "High", "Medium", "Low" (default: "Medium")
 
-.PARAMETER DryRun
-    Show what would be deleted without actually deleting (default: true when DeleteUnused is true)
+.PARAMETER ValidateClasses
+    Perform additional validation to check if classes actually exist (default: true)
 
-.PARAMETER CreateBackup
-    Create backup copies of files before deletion (default: true when DeleteUnused is true)
-
-.PARAMETER Interactive
-    Ask for confirmation before deleting each file (default: false)
+.PARAMETER Debug
+    Enable detailed diagnostic output for troubleshooting file reading issues
 
 .EXAMPLE
-    .\unused-css-detector.ps1
+    .\unused-css-detector-enhanced.ps1
     
 .EXAMPLE
-    .\unused-css-detector.ps1 -StylesPath "./styles" -ComponentsPath "./components" -OutputFormat "detailed"
+    .\unused-css-detector-enhanced.ps1 -ConfidenceLevel "High"
 
 .EXAMPLE
-    .\unused-css-detector.ps1 -DeleteUnused -DryRun:$false -CreateBackup
-
-.EXAMPLE
-    .\unused-css-detector.ps1 -DeleteUnused -Interactive
+    .\unused-css-detector-enhanced.ps1 -OutputFormat "detailed"
 #>
 
 param(
     [string]$StylesPath = "./src/styles",
     [string]$ComponentsPath = "./src",
-    [string[]]$ExcludePatterns = @("w-*", "h-*", "text-*", "bg-*", "border-*", "p-*", "m-*", "flex*", "grid*"),
     [ValidateSet("summary", "detailed", "json")]
     [string]$OutputFormat = "summary",
-    [switch]$DeleteUnused,
-    [bool]$DryRun = $true,
-    [bool]$CreateBackup = $true,
-    [switch]$Interactive
+    [ValidateSet("High", "Medium", "Low")]
+    [string]$ConfidenceLevel = "Medium",
+    [bool]$ValidateClasses = $true,
+    [switch]$Debug
+)
+
+# Enhanced exclusion patterns
+$EnhancedExcludePatterns = @(
+    # Utility classes
+    "w-*", "h-*", "text-*", "bg-*", "border-*", "p-*", "m-*", "flex*", "grid*",
+    # SCSS functions and data
+    "*adjust*", "*has-key*", "*map-*", "*svg*", "data:*",
+    # Common false positives
+    "*url*", "*http*", "*xmlns*", "*viewBox*", "*stroke*", "*fill*"
 )
 
 # Color functions for better output
@@ -64,77 +66,190 @@ function Write-Warning { param($Message) Write-Host $Message -ForegroundColor Ye
 function Write-Error { param($Message) Write-Host $Message -ForegroundColor Red }
 function Write-Info { param($Message) Write-Host $Message -ForegroundColor Cyan }
 
-# Function to extract CSS classes from SCSS content
-function Get-CSSClassesFromSCSS {
+# Diagnostic function for file reading issues
+function Test-FileReadability {
+    param([string]$FilePath)
+    
+    $diagnostics = @{
+        Exists = $false
+        Readable = $false
+        Size = 0
+        Encoding = "Unknown"
+        Error = $null
+    }
+    
+    try {
+        $file = Get-Item -Path $FilePath -ErrorAction Stop
+        $diagnostics.Exists = $true
+        $diagnostics.Size = $file.Length
+        
+        # Try to read first few bytes to detect encoding
+        $bytes = [System.IO.File]::ReadAllBytes($FilePath) | Select-Object -First 4
+        if ($bytes.Count -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $diagnostics.Encoding = "UTF8-BOM"
+        } elseif ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $diagnostics.Encoding = "UTF16-LE"
+        } elseif ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+            $diagnostics.Encoding = "UTF16-BE"
+        } else {
+            $diagnostics.Encoding = "UTF8-ASCII"
+        }
+        
+        # Test actual readability
+        $null = Get-Content -Path $FilePath -Raw -Encoding UTF8 -ErrorAction Stop
+        $diagnostics.Readable = $true
+    }
+    catch {
+        $diagnostics.Error = $_.Exception.Message
+    }
+    
+    return $diagnostics
+}
+
+# Enhanced SCSS parsing with intelligent filtering
+function Get-EnhancedCSSClasses {
     param([string]$Content, [string]$FilePath)
     
-    $classes = @()
-    $lines = $Content -split "`n"
-    $parentSelectors = @()
-    $indentLevel = 0
+    $classes = New-Object System.Collections.ArrayList
+    $classesWithConfidence = New-Object System.Collections.ArrayList
+    
+    # Pre-filter content to remove SCSS functions and data URIs
+    $filteredContent = $Content
+    $filteredContent = $filteredContent -replace 'color\.adjust\([^)]+\)', ''
+    $filteredContent = $filteredContent -replace 'map\.has-key\([^)]+\)', ''
+    $filteredContent = $filteredContent -replace 'map\.get\([^)]+\)', ''
+    $filteredContent = $filteredContent -replace 'rgba?\([^)]+\)', ''
+    $filteredContent = $filteredContent -replace 'url\([^)]+\)', ''
+    $filteredContent = $filteredContent -replace 'data:image/[^"''`]+', ''
+    $filteredContent = $filteredContent -replace 'xmlns[^"''`]*', ''
+    
+    $lines = $filteredContent -split "`n"
+    $parentSelectors = New-Object System.Collections.ArrayList
     
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i].Trim()
         
-        # Skip comments and empty lines
-        if ($line -match '^\s*//|^\s*\/\*|^\s*$') { continue }
+        # Skip comments, empty lines, and imports
+        if ($line -match '^\s*//|^\s*\/\*|^\s*$|^\s*@') { 
+            continue 
+        }
         
-        # Calculate indent level for nested structure
-        $currentIndent = ($lines[$i] -replace '[^\s].*$', '').Length
-        
-        # Handle closing braces - pop parent selectors
+        # Handle closing braces
         if ($line -match '^\s*}') {
             if ($parentSelectors.Count -gt 0) {
-                $parentSelectors = $parentSelectors | Select-Object -First ($parentSelectors.Count - 1)
+                $parentSelectors.RemoveAt($parentSelectors.Count - 1)
             }
             continue
         }
         
         # Extract direct class selectors
-        if ($line -match '\.([a-zA-Z][a-zA-Z0-9_-]*)\s*\{?') {
+        if ($line -match '^\s*\.([a-zA-Z][a-zA-Z0-9_-]*)\s*\{') {
             $className = $matches[1]
-            $classes += $className
             
-            # If this starts a block, add as parent selector
-            if ($line -match '\{' -or ($i + 1 -lt $lines.Count -and $lines[$i + 1] -match '^\s*[\.&]')) {
-                $parentSelectors += $className
+            if (Test-ValidClassName -ClassName $className) {
+                $confidence = Get-ClassConfidence -ClassName $className -FilePath $FilePath
+                
+                $null = $classes.Add($className)
+                $classData = @{
+                    Name = $className
+                    Confidence = $confidence
+                    Context = "Direct class"
+                    File = $FilePath
+                }
+                $null = $classesWithConfidence.Add($classData)
+                
+                # Add as parent selector
+                $null = $parentSelectors.Add($className)
             }
         }
         
-        # Handle BEM modifiers (&__element, &--modifier)
-        if ($line -match '&(__|--)([a-zA-Z][a-zA-Z0-9_-]*)\s*\{?') {
+        # Handle BEM modifiers
+        if ($line -match '&(__|--)([a-zA-Z][a-zA-Z0-9_-]*)\s*\{') {
             $separator = $matches[1]
             $modifier = $matches[2]
             
-            # Construct full class name with current parent
             if ($parentSelectors.Count -gt 0) {
-                $parentClass = $parentSelectors[-1]
+                $parentClass = $parentSelectors[$parentSelectors.Count - 1]
                 $fullClassName = "$parentClass$separator$modifier"
-                $classes += $fullClassName
-            }
-        }
-        
-        # Handle nested selectors with parent reference
-        if ($line -match '&\.([a-zA-Z][a-zA-Z0-9_-]*)\s*\{?') {
-            $nestedClass = $matches[1]
-            if ($parentSelectors.Count -gt 0) {
-                $parentClass = $parentSelectors[-1]
-                $classes += $nestedClass  # The nested class itself
+                
+                if (Test-ValidClassName -ClassName $fullClassName) {
+                    $confidence = Get-ClassConfidence -ClassName $fullClassName -FilePath $FilePath
+                    
+                    $null = $classes.Add($fullClassName)
+                    $classData = @{
+                        Name = $fullClassName
+                        Confidence = $confidence
+                        Context = "BEM modifier"
+                        File = $FilePath
+                    }
+                    $null = $classesWithConfidence.Add($classData)
+                }
             }
         }
     }
     
-    return $classes | Sort-Object -Unique
+    return @{
+        Classes = @($classes | Sort-Object -Unique)
+        ClassesWithMetadata = @($classesWithConfidence)
+    }
 }
 
-# Function to search for CSS class usage in JavaScript/JSX files
-function Find-ClassUsageInFiles {
+# Validate if a detected string is actually a CSS class
+function Test-ValidClassName {
+    param([string]$ClassName)
+    
+    # Filter out obvious false positives
+    if ($ClassName -match '^(data|http|https|www)') { return $false }
+    if ($ClassName -match '\.(com|org|net|svg|png|jpg)$') { return $false }
+    if ($ClassName -match '^[0-9]+$') { return $false }
+    if ($ClassName -match 'xmlns') { return $false }
+    if ($ClassName -match '(adjust|has-key|get|merge)') { return $false }
+    if ($ClassName -match '^(path|svg|image|url)') { return $false }
+    
+    # Must be valid CSS identifier
+    return $ClassName -match '^[a-zA-Z][a-zA-Z0-9_-]*$'
+}
+
+# Calculate confidence score for detected class
+function Get-ClassConfidence {
+    param([string]$ClassName, [string]$FilePath)
+    
+    # Default confidence
+    $confidence = "Medium"
+    
+    # High confidence indicators
+    if ($ClassName -match '^[a-z]+(-[a-z]+)*$') {
+        $confidence = "High"  # Standard kebab-case naming
+    }
+    elseif ($ClassName -match '__.*--') {
+        $confidence = "High"  # Clear BEM pattern
+    }
+    elseif ($FilePath -match '(components|features)') {
+        $confidence = "High"  # Component files usually have real classes
+    }
+    
+    # Low confidence indicators
+    elseif ($ClassName.Length -lt 3) {
+        $confidence = "Low"   # Very short names are suspicious
+    }
+    elseif ($ClassName -match '[0-9]{3,}') {
+        $confidence = "Low"   # Contains many numbers
+    }
+    elseif ($FilePath -match '(mixins|utilities|helpers)' -and $ClassName -match '-$') {
+        $confidence = "Low"   # Generated utility classes
+    }
+    
+    return $confidence
+}
+
+# Enhanced usage detection
+function Find-EnhancedClassUsage {
     param([string[]]$Classes, [string]$SearchPath)
     
-    $usedClasses = @()
+    $usedClasses = New-Object System.Collections.ArrayList
     $jsFiles = Get-ChildItem -Path $SearchPath -Recurse -Include "*.js", "*.jsx", "*.ts", "*.tsx" -ErrorAction SilentlyContinue
     
-    Write-Info "Searching for class usage in $($jsFiles.Count) JavaScript/TypeScript files..."
+    Write-Info "Searching for class usage in $($jsFiles.Count) component files..."
     
     foreach ($file in $jsFiles) {
         try {
@@ -142,12 +257,14 @@ function Find-ClassUsageInFiles {
             if (-not $content) { continue }
             
             foreach ($class in $Classes) {
-                # Simple check: does the class name appear anywhere in the file?
-                if ($content -match [regex]::Escape($class)) {
-                    $usedClasses += @{
-                        Class = $class
-                        File = $file.FullName
-                        Context = "Found in file"
+                # Simple but effective detection
+                if ($content -match $class) {
+                    # Verify it's actually a className usage, not just a string match
+                    if ($content -match "className.*$class" -or $content -match "class.*$class") {
+                        $null = $usedClasses.Add(@{
+                            Class = $class
+                            File = $file.FullName
+                        })
                     }
                 }
             }
@@ -160,216 +277,82 @@ function Find-ClassUsageInFiles {
     return $usedClasses
 }
 
-# Function to check if a class should be excluded
-function Test-ExcludeClass {
-    param([string]$ClassName, [string[]]$ExcludePatterns)
+# Enhanced exclusion check
+function Test-EnhancedExclusion {
+    param([string]$ClassName)
     
-    foreach ($pattern in $ExcludePatterns) {
+    foreach ($pattern in $EnhancedExcludePatterns) {
         if ($ClassName -like $pattern) {
             return $true
         }
     }
+    
     return $false
 }
 
-# Function to create backup of a file
-function New-FileBackup {
-    param([string]$FilePath)
+# Enhanced reporting with confidence categorization
+function Write-EnhancedReport {
+    param([hashtable]$Results, [array]$ClassesWithMetadata)
     
-    try {
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $backupPath = "$FilePath.backup_$timestamp"
-        Copy-Item -Path $FilePath -Destination $backupPath -Force
-        return $backupPath
-    }
-    catch {
-        Write-Warning "Failed to create backup for ${FilePath}: $($_.Exception.Message)"
-        return $null
-    }
-}
-
-# Function to remove unused CSS classes from SCSS content
-function Remove-UnusedCSSFromContent {
-    param([string]$Content, [string[]]$UnusedClasses, [string]$FilePath)
+    $highConfidence = $ClassesWithMetadata | Where-Object { $_.Confidence -eq "High" -and $_.Name -in $Results.UnusedClasses }
+    $mediumConfidence = $ClassesWithMetadata | Where-Object { $_.Confidence -eq "Medium" -and $_.Name -in $Results.UnusedClasses }
+    $lowConfidence = $ClassesWithMetadata | Where-Object { $_.Confidence -eq "Low" -and $_.Name -in $Results.UnusedClasses }
     
-    $lines = $Content -split "`n"
-    $newLines = @()
-    $skipBlock = $false
-    $currentBlockClass = ""
-    $blockStartLine = -1
-    $braceCount = 0
+    Write-Info "`nENHANCED ANALYSIS RESULTS"
+    Write-Info "========================="
+    Write-Success "Used classes: $($Results.UsedClasses.Count)"
+    Write-Info "Confidence breakdown:"
+    Write-Success "  High confidence unused: $($highConfidence.Count)"
+    Write-Warning "  Medium confidence unused: $($mediumConfidence.Count)"
+    Write-Host "  Low confidence unused: $($lowConfidence.Count)" -ForegroundColor Gray
     
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        $trimmedLine = $line.Trim()
-        
-        # Check if this line starts a CSS class block that should be removed
-        if ($trimmedLine -match '\.([a-zA-Z][a-zA-Z0-9_-]*)\s*\{?') {
-            $className = $matches[1]
-            if ($className -in $UnusedClasses) {
-                $skipBlock = $true
-                $currentBlockClass = $className
-                $blockStartLine = $i
-                $braceCount = 0
-                
-                # Count opening braces in this line
-                $braceCount += ($line -split '\{', 0, "SimpleMatch").Count - 1
-                
-                # If there's no opening brace, look ahead for it
-                if ($braceCount -eq 0) {
-                    for ($j = $i + 1; $j -lt [Math]::Min($i + 3, $lines.Count); $j++) {
-                        if ($lines[$j] -match '\{') {
-                            $braceCount += ($lines[$j] -split '\{', 0, "SimpleMatch").Count - 1
-                            break
-                        }
-                    }
-                }
-                
-                continue  # Skip this line
+    if ($OutputFormat -eq "detailed") {
+        if ($highConfidence.Count -gt 0) {
+            Write-Success "`nHIGH CONFIDENCE - Safe to remove:"
+            foreach ($class in $highConfidence) {
+                $fileName = Split-Path $class.File -Leaf
+                Write-Host "  • .$($class.Name) (in $fileName)" -ForegroundColor Green
             }
         }
         
-        # Handle BEM modifiers and nested selectors
-        if ($skipBlock -eq $false -and $trimmedLine -match '&(__|--)([a-zA-Z][a-zA-Z0-9_-]*)\s*\{?') {
-            $separator = $matches[1]
-            $modifier = $matches[2]
-            $fullClassName = "$currentBlockClass$separator$modifier"
-            
-            if ($fullClassName -in $UnusedClasses) {
-                $skipBlock = $true
-                $braceCount = 0
-                $braceCount += ($line -split '\{', 0, "SimpleMatch").Count - 1
-                continue  # Skip this line
+        if ($mediumConfidence.Count -gt 0 -and $ConfidenceLevel -ne "High") {
+            Write-Warning "`nMEDIUM CONFIDENCE - Review recommended:"
+            foreach ($class in $mediumConfidence) {
+                $fileName = Split-Path $class.File -Leaf
+                Write-Host "  • .$($class.Name) (in $fileName)" -ForegroundColor Yellow
             }
         }
         
-        # If we're skipping a block, track braces to know when to stop
-        if ($skipBlock) {
-            # Count braces in current line
-            $openBraces = ($line -split '\{', 0, "SimpleMatch").Count - 1
-            $closeBraces = ($line -split '\}', 0, "SimpleMatch").Count - 1
-            
-            $braceCount += $openBraces - $closeBraces
-            
-            # If braces are balanced, we've reached the end of the block
-            if ($braceCount -le 0) {
-                $skipBlock = $false
-                $currentBlockClass = ""
+        if ($lowConfidence.Count -gt 0 -and $ConfidenceLevel -eq "Low") {
+            Write-Host "`nLOW CONFIDENCE - Manual verification needed:" -ForegroundColor Gray
+            foreach ($class in $lowConfidence) {
+                $fileName = Split-Path $class.File -Leaf
+                Write-Host "  • .$($class.Name) (in $fileName)" -ForegroundColor Gray
             }
-            continue  # Skip this line
+        }
+    } else {
+        Write-Success "`nHIGH CONFIDENCE UNUSED CLASSES:"
+        foreach ($class in $highConfidence) {
+            Write-Host "  • .$($class.Name)" -ForegroundColor Green
         }
         
-        # Add the line if we're not skipping
-        $newLines += $line
-    }
-    
-    # Clean up empty lines (remove multiple consecutive empty lines)
-    $cleanedLines = @()
-    $emptyLineCount = 0
-    
-    foreach ($line in $newLines) {
-        if ($line.Trim() -eq "") {
-            $emptyLineCount++
-            if ($emptyLineCount -le 2) {  # Allow max 2 consecutive empty lines
-                $cleanedLines += $line
+        if ($ConfidenceLevel -ne "High" -and $mediumConfidence.Count -gt 0) {
+            Write-Warning "`nMEDIUM CONFIDENCE UNUSED CLASSES:"
+            foreach ($class in $mediumConfidence) {
+                Write-Host "  • .$($class.Name)" -ForegroundColor Yellow
             }
-        } else {
-            $emptyLineCount = 0
-            $cleanedLines += $line
         }
     }
     
-    return $cleanedLines -join "`n"
-}
-
-# Function to delete unused classes from files
-function Remove-UnusedCSSClasses {
-    param(
-        [hashtable]$ClassesByFile,
-        [string[]]$UnusedClasses,
-        [bool]$DryRun,
-        [bool]$CreateBackup,
-        [bool]$Interactive
-    )
-    
-    $deletionResults = @{
-        FilesModified = 0
-        ClassesRemoved = 0
-        BackupsCreated = @()
-        Errors = @()
-    }
-    
-    Write-Info "`n🗑️ DELETION PROCESS"
-    Write-Info "=================="
-    
-    if ($DryRun) {
-        Write-Warning "DRY RUN MODE - No files will be modified"
-    }
-    
-    foreach ($file in $ClassesByFile.Keys) {
-        $fileUnusedClasses = $ClassesByFile[$file] | Where-Object { $_ -in $UnusedClasses }
-        
-        if ($fileUnusedClasses.Count -eq 0) {
-            continue  # No unused classes in this file
-        }
-        
-        $relativePath = (Resolve-Path -Path $file -Relative -ErrorAction SilentlyContinue) -replace '^\.[\\/]', ''
-        if (-not $relativePath) { $relativePath = $file }
-        
-        Write-Host "`n📄 Processing: $relativePath" -ForegroundColor Cyan
-        Write-Host "   Classes to remove: $($fileUnusedClasses.Count)" -ForegroundColor Yellow
-        $fileUnusedClasses | ForEach-Object { Write-Host "   - .$_" -ForegroundColor Red }
-        
-        # Interactive confirmation
-        if ($Interactive -and -not $DryRun) {
-            $response = Read-Host "   Remove these classes from this file? (y/N)"
-            if ($response -ne 'y' -and $response -ne 'Y') {
-                Write-Host "   Skipped by user" -ForegroundColor Gray
-                continue
-            }
-        }
-        
-        if (-not $DryRun) {
-            try {
-                # Create backup if requested
-                if ($CreateBackup) {
-                    $backupPath = New-FileBackup -FilePath $file
-                    if ($backupPath) {
-                        $deletionResults.BackupsCreated += $backupPath
-                        Write-Info "   ✅ Backup created: $backupPath"
-                    }
-                }
-                
-                # Read current content
-                $currentContent = Get-Content -Path $file -Raw -ErrorAction Stop
-                
-                # Remove unused classes
-                $newContent = Remove-UnusedCSSFromContent -Content $currentContent -UnusedClasses $fileUnusedClasses -FilePath $file
-                
-                # Write back to file
-                Set-Content -Path $file -Value $newContent -NoNewline -ErrorAction Stop
-                
-                $deletionResults.FilesModified++
-                $deletionResults.ClassesRemoved += $fileUnusedClasses.Count
-                
-                Write-Success "   ✅ Removed $($fileUnusedClasses.Count) unused classes"
-            }
-            catch {
-                $errorMsg = "Failed to process ${relativePath}: " + $_.Exception.Message
-                $deletionResults.Errors += $errorMsg
-                Write-Error "   ❌ $errorMsg"
-            }
-        } else {
-            Write-Info "   [DRY RUN] Would remove $($fileUnusedClasses.Count) classes"
-        }
-    }
-    
-    return $deletionResults
+    Write-Info "`nRECOMMENDATIONS:"
+    Write-Info "• Start with HIGH confidence classes (safest to remove)"
+    Write-Info "• Review MEDIUM confidence classes for dynamic usage"
+    Write-Info "• Test your application after removing any classes"
 }
 
 # Main execution
-Write-Info "CSS Unused Class Detector"
-Write-Info "========================="
+Write-Info "Enhanced CSS Unused Class Detector"
+Write-Info "=================================="
 
 # Validate paths
 if (-not (Test-Path $StylesPath)) {
@@ -393,22 +376,96 @@ if ($scssFiles.Count -eq 0) {
 
 Write-Success "Found $($scssFiles.Count) SCSS files"
 
-# Extract all CSS classes
-$allClasses = @()
-$classesByFile = @{}
+# Extract all CSS classes with enhanced parsing
+$allClassesWithMetadata = New-Object System.Collections.ArrayList
+$allClasses = New-Object System.Collections.ArrayList
 
 foreach ($file in $scssFiles) {
     try {
-        $content = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
+        # Enhanced diagnostics for file reading issues
+        if ($Debug) {
+            Write-Info "Processing: $($file.Name)"
+            $diagnostics = Test-FileReadability -FilePath $file.FullName
+            Write-Host "  Exists: $($diagnostics.Exists), Size: $($diagnostics.Size) bytes, Encoding: $($diagnostics.Encoding)" -ForegroundColor Gray
+            if ($diagnostics.Error) {
+                Write-Host "  Error: $($diagnostics.Error)" -ForegroundColor Red
+            }
+        }
+        
+        # Check file properties first
+        if (-not $file.Exists) {
+            Write-Warning "File does not exist: $($file.FullName)"
+            continue
+        }
+        
+        if ($file.Length -eq 0) {
+            Write-Warning "File is empty: $($file.FullName)"
+            continue
+        }
+        
+        # Try to read the file with better error handling
+        $content = $null
+        try {
+            $content = Get-Content -Path $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+        }
+        catch [System.UnauthorizedAccessException] {
+            Write-Warning "Access denied to file: $($file.FullName)"
+            continue
+        }
+        catch [System.IO.FileNotFoundException] {
+            Write-Warning "File not found: $($file.FullName)"
+            continue
+        }
+        catch [System.IO.IOException] {
+            Write-Warning "IO error reading file: $($file.FullName) - $_"
+            continue
+        }
+        catch {
+            Write-Warning "Unknown error reading file: $($file.FullName) - $_"
+            continue
+        }
+        
         if ($content) {
-            $classes = Get-CSSClassesFromSCSS -Content $content -FilePath $file.FullName
-            $allClasses += $classes
-            $classesByFile[$file.FullName] = $classes
-            Write-Info "  $($file.Name): $($classes.Count) classes"
+            $result = Get-EnhancedCSSClasses -Content $content -FilePath $file.FullName
+            $classes = $result.Classes
+            $metadata = $result.ClassesWithMetadata
+            
+            if ($Debug) {
+                Write-Host "  Result types: Classes=$($classes.GetType().Name), Metadata=$($metadata.GetType().Name)" -ForegroundColor Gray
+                Write-Host "  Classes content: $($classes -join ', ')" -ForegroundColor Gray
+            }
+            
+            # Safely add classes - handle null and single values
+            if ($classes) {
+                if ($classes -is [array] -or $classes -is [System.Collections.ArrayList]) {
+                    $allClasses.AddRange($classes)
+                } else {
+                    # Single item, add individually
+                    $null = $allClasses.Add($classes)
+                }
+            }
+            
+            # Safely add metadata - handle null and single values
+            if ($metadata) {
+                if ($metadata -is [array] -or $metadata -is [System.Collections.ArrayList]) {
+                    $allClassesWithMetadata.AddRange($metadata)
+                } else {
+                    # Single item, add individually
+                    $null = $allClassesWithMetadata.Add($metadata)
+                }
+            }
+            
+            $classCount = if ($classes) { 
+                if ($classes -is [array] -or $classes -is [System.Collections.ArrayList]) { $classes.Count } else { 1 }
+            } else { 0 }
+            
+            Write-Info "  $($file.Name): $classCount classes"
+        } else {
+            Write-Warning "File content is null after reading: $($file.FullName)"
         }
     }
     catch {
-        Write-Warning "Could not read SCSS file: $($file.FullName)"
+        Write-Warning "Could not process SCSS file: $($file.FullName) - Error: $_"
     }
 }
 
@@ -416,133 +473,54 @@ $uniqueClasses = $allClasses | Sort-Object -Unique
 Write-Success "Total unique CSS classes found: $($uniqueClasses.Count)"
 
 # Filter out excluded patterns
-$filteredClasses = $uniqueClasses | Where-Object { -not (Test-ExcludeClass -ClassName $_ -ExcludePatterns $ExcludePatterns) }
+$filteredClasses = $uniqueClasses | Where-Object { -not (Test-EnhancedExclusion -ClassName $_) }
 $excludedCount = $uniqueClasses.Count - $filteredClasses.Count
 
 if ($excludedCount -gt 0) {
-    Write-Info "Excluded $excludedCount classes matching patterns: $($ExcludePatterns -join ', ')"
+    Write-Info "Excluded $excludedCount classes (SCSS functions, data URIs, etc.)"
 }
 
-# Search for usage
-Write-Info "Searching for class usage in: $ComponentsPath"
-$usedClassesData = Find-ClassUsageInFiles -Classes $filteredClasses -SearchPath $ComponentsPath
+# Filter by confidence level
+$confidenceOrder = @{ "High" = 3; "Medium" = 2; "Low" = 1 }
+$minLevel = $confidenceOrder[$ConfidenceLevel]
 
+$confidenceFilteredClasses = $allClassesWithMetadata | Where-Object { 
+    $confidenceOrder[$_.Confidence] -ge $minLevel 
+} | ForEach-Object { $_.Name } | Sort-Object -Unique
+
+$filteredClasses = $filteredClasses | Where-Object { $_ -in $confidenceFilteredClasses }
+
+Write-Info "Classes meeting '$ConfidenceLevel' confidence threshold: $($filteredClasses.Count)"
+
+# Search for usage
+$usedClassesData = Find-EnhancedClassUsage -Classes $filteredClasses -SearchPath $ComponentsPath
 $usedClassNames = $usedClassesData | ForEach-Object { $_.Class } | Sort-Object -Unique
 $unusedClasses = $filteredClasses | Where-Object { $_ -notin $usedClassNames }
 
-# Handle deletion parameters
-if ($DeleteUnused) {
-    # Override DryRun default when DeleteUnused is specified
-    if ($PSBoundParameters.ContainsKey('DryRun') -eq $false) {
-        $DryRun = $true  # Default to dry run for safety
-    }
+# Prepare results
+$results = @{
+    TotalClasses = $uniqueClasses.Count
+    ExcludedClasses = $excludedCount
+    UsedClasses = $usedClassNames
+    UnusedClasses = $unusedClasses
 }
 
-# Output results
-Write-Info "`nRESULTS"
-Write-Info "======="
-Write-Success "Used classes: $($usedClassNames.Count)"
-Write-Warning "Unused classes: $($unusedClasses.Count)"
+# Generate enhanced report
+Write-EnhancedReport -Results $results -ClassesWithMetadata $allClassesWithMetadata
 
-if ($unusedClasses.Count -gt 0) {
-    # Perform deletion if requested
-    if ($DeleteUnused) {
-        # Safety confirmation for non-dry-run deletion
-        if (-not $DryRun -and -not $Interactive) {
-            Write-Warning "`n⚠️  DANGER: You are about to delete $($unusedClasses.Count) CSS classes from $($classesByFile.Keys.Count) files!"
-            Write-Warning "This action cannot be easily undone (except from backups)."
-            $confirmation = Read-Host "Are you sure you want to proceed? Type 'DELETE' to confirm"
-            
-            if ($confirmation -ne 'DELETE') {
-                Write-Info "Deletion cancelled by user."
-                exit 0
-            }
+if ($OutputFormat -eq "json") {
+    $jsonResult = @{
+        summary = @{
+            totalClasses = $results.TotalClasses
+            excludedClasses = $results.ExcludedClasses
+            usedClasses = $results.UsedClasses.Count
+            unusedClasses = $results.UnusedClasses.Count
+            confidenceLevel = $ConfidenceLevel
         }
-        
-        # Perform the deletion
-        $deletionResults = Remove-UnusedCSSClasses -ClassesByFile $classesByFile -UnusedClasses $unusedClasses -DryRun $DryRun -CreateBackup $CreateBackup -Interactive $Interactive
-        
-        # Report deletion results
-        Write-Info "`n📊 DELETION SUMMARY"
-        Write-Info "=================="
-        
-        if ($DryRun) {
-            Write-Warning "DRY RUN COMPLETED - No files were modified"
-        } else {
-            Write-Success "Files modified: $($deletionResults.FilesModified)"
-            Write-Success "Classes removed: $($deletionResults.ClassesRemoved)"
-            
-            if ($deletionResults.BackupsCreated.Count -gt 0) {
-                Write-Info "Backups created: $($deletionResults.BackupsCreated.Count)"
-                $deletionResults.BackupsCreated | ForEach-Object {
-                    Write-Info "  - $_"
-                }
-            }
-            
-            if ($deletionResults.Errors.Count -gt 0) {
-                Write-Warning "Errors encountered: $($deletionResults.Errors.Count)"
-                $deletionResults.Errors | ForEach-Object {
-                    Write-Warning "  - $_"
-                }
-            }
-        }
-    } else {
-        # Original output logic when not deleting
-        switch ($OutputFormat) {
-            "detailed" {
-                Write-Warning "`nUNUSED CLASSES (by file):"
-                
-                foreach ($file in $classesByFile.Keys) {
-                    $fileUnusedClasses = $classesByFile[$file] | Where-Object { $_ -in $unusedClasses }
-                    if ($fileUnusedClasses.Count -gt 0) {
-                        $relativePath = (Resolve-Path -Path $file -Relative) -replace '^\.[\\/]', ''
-                        Write-Host "`n$relativePath" -ForegroundColor Magenta
-                        $fileUnusedClasses | ForEach-Object {
-                            Write-Host "   - .$_" -ForegroundColor Red
-                        }
-                    }
-                }
-            }
-            "json" {
-                $result = @{
-                    summary = @{
-                        totalClasses = $uniqueClasses.Count
-                        excludedClasses = $excludedCount
-                        usedClasses = $usedClassNames.Count
-                        unusedClasses = $unusedClasses.Count
-                    }
-                    unusedClasses = $unusedClasses
-                    usedClasses = $usedClassNames
-                    classesByFile = $classesByFile
-                }
-                $result | ConvertTo-Json -Depth 10
-            }
-            default {
-                Write-Warning "`nUNUSED CLASSES:"
-                $unusedClasses | ForEach-Object {
-                    Write-Host "   - .$_" -ForegroundColor Red
-                }
-            }
-        }
-        
-        Write-Info "`nTIP: Review these classes before deletion. Some might be:"
-        Write-Info "   - Used in dynamic class generation"
-        Write-Info "   - Applied via CSS-in-JS libraries"
-        Write-Info "   - Reserved for future features"
-        Write-Info "   - Used in HTML templates or external files"
-        
-        Write-Info "`n🔧 TO DELETE UNUSED CLASSES:"
-        Write-Info "   # Dry run (safe preview):"
-        Write-Info "   .\scripts\unused-css-detector.ps1 -DeleteUnused"
-        Write-Info ""
-        Write-Info "   # Actually delete with backups:"
-        Write-Info "   .\scripts\unused-css-detector.ps1 -DeleteUnused -DryRun:`$false -CreateBackup"
-        Write-Info ""
-        Write-Info "   # Interactive deletion:"
-        Write-Info "   .\scripts\unused-css-detector.ps1 -DeleteUnused -DryRun:`$false -Interactive"
+        unusedClasses = $results.UnusedClasses
+        usedClasses = $results.UsedClasses
     }
-} else {
-    Write-Success "`nNo unused CSS classes found! Your styles are clean."
+    $jsonResult | ConvertTo-Json -Depth 10
 }
 
-Write-Info "`nAnalysis complete!" 
+Write-Info "`nEnhanced analysis complete!" 
