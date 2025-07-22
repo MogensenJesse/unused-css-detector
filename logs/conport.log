@@ -1,8 +1,0 @@
-2025-07-22 22:32:23,171 - INFO - context_portal_mcp.main - File logging configured to: d:\unused-css-detector\logs\conport.log
-2025-07-22 22:32:23,171 - INFO - context_portal_mcp.main - Parsed CLI args: Namespace(host='127.0.0.1', port=8000, workspace_id='${workspaceFolder}', mode='stdio', log_file='d:\\unused-css-detector\\logs\\conport.log', log_level='INFO')
-2025-07-22 22:32:23,171 - INFO - context_portal_mcp.main - Starting ConPort in STDIO mode using FastMCP for initial CLI arg workspace_id: ${workspaceFolder}
-2025-07-22 22:32:23,171 - WARNING - context_portal_mcp.main - MAIN.PY: WARNING - Workspace ID was literally '${workspaceFolder}'. This variable was not expanded by the client IDE. Falling back to current working directory as workspace_id: C:\Users\jesse. Ensure CWD in MCP config ('C:\Users\jesse') is the correct project workspace.
-2025-07-22 22:32:23,171 - INFO - context_portal_mcp.main - STDIO mode: Using effective_workspace_id 'C:\Users\jesse'. Database directory will be created on first actual DB use.
-2025-07-22 22:32:23,179 - INFO - context_portal_mcp.main - ConPort FastMCP server lifespan starting.
-2025-07-22 22:32:23,200 - INFO - mcp.server.lowlevel.server - Processing request of type ListToolsRequest
-2025-07-22 22:32:23,202 - INFO - mcp.server.lowlevel.server - Processing request of type ListToolsRequest
