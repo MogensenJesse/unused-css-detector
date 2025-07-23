@@ -30,6 +30,18 @@
 .PARAMETER Debug
     Enable detailed diagnostic output for troubleshooting file reading issues
 
+.PARAMETER DeleteUnused
+    Enable deletion mode to actually remove unused classes (default: false)
+
+.PARAMETER DryRun
+    Preview deletions without making changes (default: true when DeleteUnused is enabled)
+
+.PARAMETER CreateBackup
+    Create backup files before deletion (default: true when DeleteUnused is enabled)
+
+.PARAMETER Interactive
+    Ask for confirmation before deleting each file (default: false)
+
 .EXAMPLE
     .\unused-css-detector.ps1
     
@@ -38,6 +50,12 @@
 
 .EXAMPLE
     .\unused-css-detector.ps1 -OutputFormat "detailed"
+
+.EXAMPLE
+    .\unused-css-detector.ps1 -DeleteUnused -ConfidenceLevel "High"
+
+.EXAMPLE
+    .\unused-css-detector.ps1 -DeleteUnused -DryRun:$false -CreateBackup 
 #>
 
 param(
@@ -48,8 +66,12 @@ param(
     [ValidateSet("High", "Medium", "Low")]
     [string]$ConfidenceLevel = "Medium",
     [bool]$ValidateClasses = $true,
-    [switch]$Debug
-)
+    [switch]$Debug,
+    [switch]$DeleteUnused,
+    [bool]$DryRun = $true,
+    [bool]$CreateBackup = $true,
+    [switch]$Interactive
+) 
 
 # Enhanced exclusion patterns
 $EnhancedExcludePatterns = @(
@@ -291,6 +313,124 @@ function Test-EnhancedExclusion {
     return $false
 }
 
+# Delete unused classes from SCSS files
+function Remove-UnusedClasses {
+    param(
+        [array]$UnusedClasses,
+        [array]$ClassesWithMetadata,
+        [bool]$DryRun = $true,
+        [bool]$CreateBackup = $true,
+        [bool]$Interactive = $false
+    )
+    
+    if ($UnusedClasses.Count -eq 0) {
+        Write-Info "No unused classes to delete."
+        return
+    }
+    
+    # Group classes by file for efficient processing
+    $classesByFile = @{}
+    foreach ($classData in $ClassesWithMetadata) {
+        if ($classData.Name -in $UnusedClasses) {
+            $file = $classData.File
+            if (-not $classesByFile.ContainsKey($file)) {
+                $classesByFile[$file] = @()
+            }
+            $classesByFile[$file] += $classData
+        }
+    }
+    
+    $totalFilesToModify = $classesByFile.Count
+    $filesModified = 0
+    $classesRemoved = 0
+    
+    Write-Info "`n$(if ($DryRun) { "DRY RUN - " })DELETION PROCESS"
+    Write-Info "=================================="
+    Write-Info "Files to modify: $totalFilesToModify"
+    Write-Info "Classes to remove: $($UnusedClasses.Count)"
+    
+    if ($DryRun) {
+        Write-Warning "This is a DRY RUN - no files will be modified"
+    }
+    
+    foreach ($file in $classesByFile.Keys) {
+        $classesToRemove = $classesByFile[$file]
+        $fileName = Split-Path $file -Leaf
+        
+        Write-Info "`nProcessing: $fileName"
+        Write-Host "  Classes to remove: $($classesToRemove.Count)" -ForegroundColor Yellow
+        foreach ($class in $classesToRemove) {
+            Write-Host "    • .$($class.Name)" -ForegroundColor Gray
+        }
+        
+        if ($Interactive) {
+            $response = Read-Host "  Remove classes from this file? (y/N)"
+            if ($response -ne 'y' -and $response -ne 'Y') {
+                Write-Host "  Skipped" -ForegroundColor Yellow
+                continue
+            }
+        }
+        
+        if (-not $DryRun) {
+            try {
+                # Create backup if requested
+                if ($CreateBackup) {
+                    $backupPath = "$file.backup"
+                    Copy-Item -Path $file -Destination $backupPath -Force
+                    Write-Host "  Created backup: $backupPath" -ForegroundColor Cyan
+                }
+                
+                # Read file content
+                $content = Get-Content -Path $file -Raw -Encoding UTF8
+                $originalContent = $content
+                
+                # Remove each class
+                foreach ($classData in $classesToRemove) {
+                    $className = $classData.Name
+                    
+                    # Remove direct class definitions (simple approach)
+                    $content = $content -replace "(?m)^\s*\.$className\s*\{[^}]*\}", ""
+                    
+                    # Remove BEM modifiers
+                    $content = $content -replace "(?m)^\s*&(__|--)$className\s*\{[^}]*\}", ""
+                    
+                    # Clean up empty lines
+                    $content = $content -replace "(?m)^\s*`n", ""
+                }
+                
+                # Only write if content changed
+                if ($content -ne $originalContent) {
+                    Set-Content -Path $file -Value $content -Encoding UTF8 -NoNewline
+                    $classesRemoved += $classesToRemove.Count
+                    $filesModified++
+                    Write-Success "  ✓ Modified successfully"
+                } else {
+                    Write-Warning "  ! No changes made (classes not found in expected format)"
+                }
+            }
+            catch {
+                Write-Error "  ✗ Error modifying file: $_"
+            }
+        } else {
+            Write-Host "  [DRY RUN] Would remove $($classesToRemove.Count) classes" -ForegroundColor Cyan
+        }
+    }
+    
+    Write-Info "`nDELETION SUMMARY"
+    Write-Info "================"
+    if ($DryRun) {
+        Write-Warning "DRY RUN COMPLETE - No files were modified"
+        Write-Info "Would modify: $totalFilesToModify files"
+        Write-Info "Would remove: $($UnusedClasses.Count) classes"
+    } else {
+        Write-Success "Files modified: $filesModified / $totalFilesToModify"
+        Write-Success "Classes removed: $classesRemoved"
+        if ($CreateBackup) {
+            Write-Info "Backup files created with .backup extension"
+        }
+    }
+}
+
 # Enhanced reporting with confidence categorization
 function Write-EnhancedReport {
     param([hashtable]$Results, [array]$ClassesWithMetadata)
@@ -299,8 +439,8 @@ function Write-EnhancedReport {
     $mediumConfidence = $ClassesWithMetadata | Where-Object { $_.Confidence -eq "Medium" -and $_.Name -in $Results.UnusedClasses }
     $lowConfidence = $ClassesWithMetadata | Where-Object { $_.Confidence -eq "Low" -and $_.Name -in $Results.UnusedClasses }
     
-    Write-Info "`nENHANCED ANALYSIS RESULTS"
-    Write-Info "========================="
+    Write-Info "`nANALYSIS RESULTS"
+    Write-Info "================"
     Write-Success "Used classes: $($Results.UsedClasses.Count)"
     Write-Info "Confidence breakdown:"
     Write-Success "  High confidence unused: $($highConfidence.Count)"
@@ -506,8 +646,15 @@ $results = @{
     UnusedClasses = $unusedClasses
 }
 
-# Generate enhanced report
+# Generate report
 Write-EnhancedReport -Results $results -ClassesWithMetadata $allClassesWithMetadata
+
+# Handle deletion if requested
+if ($DeleteUnused -and $unusedClasses.Count -gt 0) {
+    Remove-UnusedClasses -UnusedClasses $unusedClasses -ClassesWithMetadata $allClassesWithMetadata -DryRun $DryRun -CreateBackup $CreateBackup -Interactive $Interactive
+} elseif ($DeleteUnused -and $unusedClasses.Count -eq 0) {
+    Write-Success "`nNo unused classes found - nothing to delete!"
+}
 
 if ($OutputFormat -eq "json") {
     $jsonResult = @{
