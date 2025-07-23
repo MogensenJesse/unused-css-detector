@@ -2,14 +2,15 @@
 
 <#
 .SYNOPSIS
-    Enhanced CSS Unused Class Detector with SCSS-aware parsing and confidence scoring
+    CSS Unused Class Detector with advanced SCSS parsing and confidence scoring
 
 .DESCRIPTION
-    This enhanced script provides intelligent detection of unused CSS classes with:
-    - SCSS-aware parsing (filters functions, variables, data URIs)
+    This script provides intelligent detection of unused CSS classes with:
+    - Advanced SCSS-aware parsing (filters functions, variables, data URIs)
     - Confidence scoring (High/Medium/Low reliability)
     - Enhanced validation and filtering
-    - Better reporting with categorized results
+    - Automated deletion with safety features
+    - Multiple output formats and comprehensive reporting
 
 .PARAMETER StylesPath
     Path to the styles directory (default: "./src/styles")
@@ -30,13 +31,13 @@
     Enable detailed diagnostic output for troubleshooting file reading issues
 
 .EXAMPLE
-    .\unused-css-detector-enhanced.ps1
+    .\unused-css-detector.ps1
     
 .EXAMPLE
-    .\unused-css-detector-enhanced.ps1 -ConfidenceLevel "High"
+    .\unused-css-detector.ps1 -ConfidenceLevel "High"
 
 .EXAMPLE
-    .\unused-css-detector-enhanced.ps1 -OutputFormat "detailed"
+    .\unused-css-detector.ps1 -OutputFormat "detailed"
 #>
 
 param(
@@ -351,8 +352,8 @@ function Write-EnhancedReport {
 }
 
 # Main execution
-Write-Info "Enhanced CSS Unused Class Detector"
-Write-Info "=================================="
+Write-Info "CSS Unused Class Detector"
+Write-Info "=========================="
 
 # Validate paths
 if (-not (Test-Path $StylesPath)) {
@@ -523,4 +524,4 @@ if ($OutputFormat -eq "json") {
     $jsonResult | ConvertTo-Json -Depth 10
 }
 
-Write-Info "`nEnhanced analysis complete!" 
+Write-Info "`nAnalysis complete!" 
